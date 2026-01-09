@@ -33,11 +33,38 @@ document.addEventListener('DOMContentLoaded', function() {
             });
 
             if (!response.ok) {
-                const errorData = await response.json();
-                throw new Error(errorData.detail || 'An error occurred while scanning documents.');
+                const contentType = response.headers.get('content-type');
+                if (contentType && contentType.includes('application/json')) {
+                    try {
+                        const errorData = await response.json();
+                        throw new Error(errorData.detail || 'An error occurred while scanning documents.');
+                    } catch (jsonError) {
+                        throw new Error(`Server error: ${response.status} ${response.statusText}`);
+                    }
+                } else {
+                    const text = await response.text();
+                    throw new Error(`Server error: ${response.status} ${response.statusText}. ${text.substring(0, 200)}`);
+                }
             }
 
-            const results = await response.json();
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                const text = await response.text();
+                throw new Error(`Unexpected response format. Server returned: ${text.substring(0, 200)}`);
+            }
+
+            const text = await response.text();
+            if (!text || text.trim() === '') {
+                throw new Error('Empty response from server. The request may have timed out.');
+            }
+
+            let results;
+            try {
+                results = JSON.parse(text);
+            } catch (parseError) {
+                throw new Error(`Invalid JSON response: ${text.substring(0, 200)}`);
+            }
+
             displayResults(results, keyword);
 
         } catch (error) {

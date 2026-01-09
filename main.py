@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.requests import Request
 from pydantic import BaseModel
 import requests
@@ -14,6 +14,14 @@ from typing import List, Optional
 import io
 
 app = FastAPI()
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal server error: {str(exc)}"}
+    )
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
@@ -57,7 +65,7 @@ def find_keyword_excerpt(text: str, keyword: str, context_chars: int = 10000) ->
 
 def extract_text_from_pdf(url: str) -> Optional[str]:
     try:
-        response = requests.get(url, timeout=30, headers={
+        response = requests.get(url, timeout=15, headers={
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
         response.raise_for_status()
@@ -79,7 +87,7 @@ def extract_text_from_pdf(url: str) -> Optional[str]:
 
 def extract_text_from_html(url: str) -> Optional[str]:
     try:
-        response = requests.get(url, timeout=30, headers={
+        response = requests.get(url, timeout=15, headers={
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
         response.raise_for_status()
@@ -102,7 +110,7 @@ def extract_text_from_html(url: str) -> Optional[str]:
 
 def find_document_links(base_url: str) -> List[str]:
     try:
-        response = requests.get(base_url, timeout=30, headers={
+        response = requests.get(base_url, timeout=15, headers={
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
         response.raise_for_status()
@@ -167,6 +175,9 @@ async def scan_documents(request: ScanRequest):
         if parsed_url.scheme not in ['http', 'https']:
             raise HTTPException(status_code=400, detail="Invalid URL scheme. Use http:// or https://")
         
+        if not request.url or not request.keyword:
+            raise HTTPException(status_code=400, detail="URL and keyword are required")
+        
         document_links = find_document_links(request.url)
         
         if not document_links:
@@ -176,16 +187,25 @@ async def scan_documents(request: ScanRequest):
         
         results = []
         for doc_url in document_links:
-            result = search_document(doc_url, request.keyword)
-            if result:
-                results.append(result)
+            try:
+                result = search_document(doc_url, request.keyword)
+                if result:
+                    results.append(result)
+            except Exception as e:
+                print(f"Error processing document {doc_url}: {e}")
+                continue
         
         return results
     
+    except HTTPException:
+        raise
     except requests.RequestException as e:
-        raise HTTPException(status_code=400, detail=f"Error fetching URL: {str(e)}")
+        error_msg = str(e) if str(e) else "Error fetching URL"
+        raise HTTPException(status_code=400, detail=f"Network error: {error_msg}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+        error_msg = str(e) if str(e) else "Unknown error occurred"
+        print(f"Unexpected error in scan_documents: {e}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {error_msg}")
 
 
 if __name__ == "__main__":
