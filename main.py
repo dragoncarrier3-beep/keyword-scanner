@@ -45,7 +45,7 @@ def normalize_text(text: str) -> str:
     return text
 
 
-def find_keyword_excerpt(text: str, keyword: str, context_chars: int = 10000) -> Optional[str]:
+def find_keyword_excerpt(text: str, keyword: str, context_chars: int = 200) -> Optional[str]:
     normalized_text = normalize_text(text)
     normalized_keyword = normalize_text(keyword)
     
@@ -65,21 +65,43 @@ def find_keyword_excerpt(text: str, keyword: str, context_chars: int = 10000) ->
 
 def extract_text_from_pdf(url: str) -> Optional[str]:
     try:
-        response = requests.get(url, timeout=15, headers={
+        response = requests.get(url, timeout=15, stream=True, headers={
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
         response.raise_for_status()
         
-        pdf_file = io.BytesIO(response.content)
+        max_size = 10 * 1024 * 1024
+        content_length = response.headers.get('content-length')
+        if content_length and int(content_length) > max_size:
+            print(f"PDF too large: {url} ({content_length} bytes)")
+            return None
+        
+        content = b''
+        for chunk in response.iter_content(chunk_size=8192):
+            content += chunk
+            if len(content) > max_size:
+                print(f"PDF too large during download: {url}")
+                return None
+        
+        pdf_file = io.BytesIO(content)
         text_content = []
+        max_pages = 20
+        max_text_length = 500000
         
         with pdfplumber.open(pdf_file) as pdf:
-            for page in pdf.pages:
+            for i, page in enumerate(pdf.pages[:max_pages]):
+                if len('\n'.join(text_content)) > max_text_length:
+                    break
                 page_text = page.extract_text()
                 if page_text:
                     text_content.append(page_text)
         
-        return '\n'.join(text_content)
+        result = '\n'.join(text_content)
+        if len(result) > max_text_length:
+            result = result[:max_text_length]
+        
+        del content, pdf_file
+        return result
     except Exception as e:
         print(f"Error extracting PDF from {url}: {e}")
         return None
@@ -87,12 +109,25 @@ def extract_text_from_pdf(url: str) -> Optional[str]:
 
 def extract_text_from_html(url: str) -> Optional[str]:
     try:
-        response = requests.get(url, timeout=15, headers={
+        response = requests.get(url, timeout=15, stream=True, headers={
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
         response.raise_for_status()
         
-        soup = BeautifulSoup(response.content, 'html.parser')
+        max_size = 5 * 1024 * 1024
+        content_length = response.headers.get('content-length')
+        if content_length and int(content_length) > max_size:
+            print(f"HTML too large: {url} ({content_length} bytes)")
+            return None
+        
+        content = b''
+        for chunk in response.iter_content(chunk_size=8192):
+            content += chunk
+            if len(content) > max_size:
+                print(f"HTML too large during download: {url}")
+                return None
+        
+        soup = BeautifulSoup(content, 'html.parser')
         
         for script in soup(["script", "style", "nav", "header", "footer"]):
             script.decompose()
@@ -102,6 +137,11 @@ def extract_text_from_html(url: str) -> Optional[str]:
         chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
         text = ' '.join(chunk for chunk in chunks if chunk)
         
+        max_text_length = 500000
+        if len(text) > max_text_length:
+            text = text[:max_text_length]
+        
+        del content, soup
         return text
     except Exception as e:
         print(f"Error extracting HTML from {url}: {e}")
@@ -110,30 +150,41 @@ def extract_text_from_html(url: str) -> Optional[str]:
 
 def find_document_links(base_url: str) -> List[str]:
     try:
-        response = requests.get(base_url, timeout=15, headers={
+        response = requests.get(base_url, timeout=15, stream=True, headers={
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
         response.raise_for_status()
         
-        soup = BeautifulSoup(response.content, 'html.parser')
+        max_size = 2 * 1024 * 1024
+        content_length = response.headers.get('content-length')
+        if content_length and int(content_length) > max_size:
+            print(f"Base page too large: {base_url}")
+            return []
+        
+        content = b''
+        for chunk in response.iter_content(chunk_size=8192):
+            content += chunk
+            if len(content) > max_size:
+                break
+        
+        soup = BeautifulSoup(content, 'html.parser')
         document_links = []
         
         for link in soup.find_all('a', href=True):
             href = link['href']
             full_url = urljoin(base_url, href)
             
-            # print(f"  - {full_url}")
-            # parsed = urlparse(full_url)
-            # if parsed.scheme not in ['http', 'https']:
-            #     continue
+            parsed = urlparse(full_url)
+            if parsed.scheme not in ['http', 'https']:
+                continue
             
-            # path_lower = parsed.path.lower()
-            if full_url.endswith('.pdf'):
+            path_lower = parsed.path.lower()
+            if path_lower.endswith('.pdf'):
                 document_links.append(full_url)
-            elif full_url.endswith(('.html', '.htm')):
+            elif path_lower.endswith(('.html', '.htm')):
                 document_links.append(full_url)
         
-        
+        del content, soup
         return list(set(document_links))
     except Exception as e:
         print(f"Error fetching base URL {base_url}: {e}")
@@ -141,26 +192,33 @@ def find_document_links(base_url: str) -> List[str]:
 
 
 def search_document(url: str, keyword: str) -> Optional[ScanResult]:
-    
-    if url.endswith('.pdf'):
-        text = extract_text_from_pdf(url)
-    elif url.endswith(('.html', '.htm')):
-        text = extract_text_from_html(url)
-    else:
-        return None
-    
-    if not text:
-        return None
-    
-    excerpt = find_keyword_excerpt(text, keyword)
-    if not excerpt:
-        return None
-    
-    return ScanResult(
-        document_url=url,
-        keyword=keyword,
-        excerpt=excerpt
-    )
+    text = None
+    try:
+        if url.endswith('.pdf'):
+            text = extract_text_from_pdf(url)
+        elif url.endswith(('.html', '.htm')):
+            text = extract_text_from_html(url)
+        else:
+            return None
+        
+        if not text:
+            return None
+        
+        excerpt = find_keyword_excerpt(text, keyword)
+        if not excerpt:
+            return None
+        
+        result = ScanResult(
+            document_url=url,
+            keyword=keyword,
+            excerpt=excerpt
+        )
+        return result
+    finally:
+        if text:
+            del text
+            import gc
+            gc.collect()
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -183,7 +241,7 @@ async def scan_documents(request: ScanRequest):
         if not document_links:
             return []
         
-        document_links = document_links[:5]
+        document_links = document_links[:3]
         
         results = []
         for doc_url in document_links:
@@ -194,6 +252,9 @@ async def scan_documents(request: ScanRequest):
             except Exception as e:
                 print(f"Error processing document {doc_url}: {e}")
                 continue
+            finally:
+                import gc
+                gc.collect()
         
         return results
     
